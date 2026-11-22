@@ -4,7 +4,7 @@ Classifies **8 emotions** (neutral, calm, happy, sad, angry, fearful, disgust, s
 
 1. **Handcrafted acoustic features** (pitch, intensity, MFCC, voice quality, spectral) with classical models
 2. **Pretrained WavLM embeddings** with an SVC
-3. **Fusion** of both (feature concatenation and probability averaging)
+3. **Early fusion** of both (feature concatenation)
 
 Every result uses a **speaker-independent split** (no actor appears in both train and test) and **per-actor feature normalization**.
 
@@ -16,20 +16,21 @@ Evaluated on 6 held-out actors (360 clips). Precision, recall and F1 are macro-a
 
 | Model | Accuracy | F1 (macro) | Precision (macro) | Recall (macro) |
 |---|---|---|---|---|
-| Handcrafted · SVC | 0.564 | TODO | TODO | TODO |
-| Handcrafted · MLP | 0.550 | TODO | TODO | TODO |
-| Handcrafted · Stacking (MLP + SVC) | 0.569 | TODO | TODO | TODO |
-| WavLM embeddings · SVC | 0.775 | TODO | TODO | TODO |
-| Early fusion (handcrafted + WavLM) · SVC | 0.789 | TODO | TODO | TODO |
+| Handcrafted · SVC | 0.564 | 0.553 | 0.560 | 0.555 |
+| Handcrafted · MLP | 0.550 | 0.537 | 0.537 | 0.539 |
+| Handcrafted · Stacking (MLP + SVC) | 0.569 | 0.554 | 0.556 | 0.560 |
+| WavLM embeddings · SVC | 0.775 | 0.783 | 0.799 | 0.779 |
+| Early fusion (handcrafted + WavLM) · SVC | 0.789 | 0.794 | 0.812 | 0.789 |
 
 Full table: [`results/results_table.csv`](results/results_table.csv)
 
 ![Confusion matrix](results/confusion_matrix.png)
 
+Confusion matrix is for the early-fusion SVC (row-normalized).
+
 ### Key findings
 - Pretrained WavLM embeddings beat handcrafted features by about 21 points of accuracy (0.775 vs 0.564 for the single-model SVCs).
 - Adding handcrafted features to the embeddings gives a small gain (0.789 vs 0.775). That is 5 more correct clips out of 360 and is **within noise** for a single 6-actor split, so I do not claim fusion helps.
-- Per-actor normalization raised the handcrafted XGBoost baseline from 45.3% to 56.7% in an early experiment, mostly by removing speaker-specific baselines.
 
 > **Caveat:** all numbers come from a single split with 6 test actors. Differences of 1-2 points are not reliable. Cross-validated results (GroupKFold over all 24 actors) would give a more stable estimate.
 
@@ -65,19 +66,18 @@ The audio is **not included** in this repository. Download it from [Kaggle](http
 | Spectral | centroid mean/std, rolloff mean, spectral tilt | 4 |
 | Timbre change | mean absolute delta of 13 MFCCs | 13 |
 
-Pitch, intensity, jitter, shimmer, HNR and formants come from Praat (via `praat-parselmouth`); the rest come from `librosa`. Audio is loaded at 16 kHz and trimmed of leading and trailing silence.
+Pitch (70-550 Hz), intensity, jitter, shimmer, HNR and formants come from Praat (via `praat-parselmouth`); the rest come from `librosa`. Audio is loaded at 16 kHz mono and trimmed of leading and trailing silence (`top_db=30`).
 
 ### 3. Per-actor normalization
 Each feature is z-scored within each actor (subtract the actor's own mean, divide by the actor's own standard deviation). This removes speaker baselines such as average pitch, loudness and formants. It uses only feature values from the actor's own clips and never the labels. In deployment it requires several clips from the same speaker.
 
 ### 4. WavLM embeddings
-`microsoft/wavlm-base-plus` hidden states are mean-pooled over time for each of the 13 layers. **Layer 6** is used because middle layers tend to carry the most emotion information. Embeddings are normalized per actor in the same way and standardized with a scaler fitted on the training set.
+`microsoft/wavlm-base-plus` hidden states are mean-pooled over time for each of the 13 layers. **Layer 6** is used because middle layers tend to carry the most emotion information; the layer was not selected by comparing scores. Embeddings are normalized per actor in the same way and standardized with a scaler fitted on the training set.
 
 ### 5. Models
 - **Handcrafted:** SVC (RBF), MLP (one hidden layer of 128 units, L2 penalty, early stopping), and a stacking classifier (MLP + SVC with an elastic-net logistic regression meta-model)
 - **Embeddings:** SVC with balanced class weights
-- **Early fusion:** one SVC on the 95 handcrafted features plus the 768 embedding dimensions
-- **Late fusion:** weighted average of predicted probabilities (0.5 WavLM SVC, 0.25 handcrafted SVC, 0.25 MLP). Weights were fixed before evaluation, not tuned on the test set.
+- **Early fusion:** one SVC (balanced class weights) on the 95 handcrafted features plus the 768 embedding dimensions
 
 All scalers and encoders are fitted on the training set only.
 
@@ -90,9 +90,6 @@ All scalers and encoders are fitted on the training set only.
 ├── README.md
 ├── requirements.txt
 ├── emotion-classification-ravdess.ipynb   # full pipeline, run top to bottom
-├── data/
-│   ├── wavlm_layer6.npz                   # precomputed WavLM layer-6 embeddings (float16)
-│   └── labels.csv                         # emotion, actor, filename, row-aligned with embeddings
 └── results/
     ├── results_table.csv
     └── confusion_matrix.png
@@ -103,27 +100,16 @@ All scalers and encoders are fitted on the training set only.
 ## How to run
 
 ```bash
-git clone https://github.com/<your-username>/speech-emotion-recognition-ravdess.git
+git clone https://github.com/chay123-crypto/speech-emotion-recognition-ravdess.git
 cd speech-emotion-recognition-ravdess
 pip install -r requirements.txt
 ```
 
-1. Download RAVDESS and set `ROOT` in the notebook to the dataset folder (it contains `Actor_01` ... `Actor_24`).
+1. Download RAVDESS and set `ROOT` in the notebook to the dataset folder (it contains `Actor_01` ... `Actor_24`). The notebook was developed on Kaggle, so the default `ROOT` is a Kaggle path.
 2. Open the notebook and run all cells.
-3. WavLM embedding extraction is slow on CPU (20-30 minutes) and takes a few minutes on a GPU. To skip it, load the precomputed embeddings:
-
-```python
-d=np.load("data/wavlm_layer6.npz")
-X_emb=pd.DataFrame(d["emb"].astype("float32"),index=d["index"]).add_prefix("emb_")
-```
+3. WavLM embedding extraction is slow on CPU (20-30 minutes) and takes a few minutes on a GPU. The notebook saves the result to `wavlm_embeds.npy`, so the extraction cell only needs to run once.
 
 The first run downloads the WavLM weights (about 380 MB) from the Hugging Face Hub, so internet access is required. For a CPU-only setup, install the CPU build of PyTorch from pytorch.org before the other requirements.
-
-### Predicting on your own recordings
-The notebook includes a `predict_speaker(folder)` function that classifies a folder of `.wav` clips.
-
-- Provide **at least 8 clips from the same speaker**, ideally with different emotions. Per-actor normalization needs several clips from one voice, and clips that are all the same emotion will wash out the differences.
-- Predictions on non-acted, noisy or non-English speech are not validated and will likely be less accurate.
 
 ---
 
@@ -138,6 +124,7 @@ The notebook includes a `predict_speaker(folder)` function that classifies a fol
 - GroupKFold cross-validation over all 24 actors, reporting mean ± std
 - Ablation by feature group (MFCC only, + prosody, + voice quality, + spectral)
 - Layer-wise comparison of WavLM embeddings, and other pretrained models (wav2vec2, HuBERT)
+- Late fusion (probability averaging) of the handcrafted and WavLM models
 - Cross-corpus testing on another emotion dataset
 
 ---
@@ -148,4 +135,4 @@ The notebook includes a `predict_speaker(folder)` function that classifies a fol
 - Boersma, P., & Weenink, D. Praat: doing phonetics by computer. Accessed through Parselmouth (Jadoul et al., 2018).
 
 ## License
-Code: MIT (or your choice). The RAVDESS dataset is licensed separately under CC BY-NC-SA 4.0, so check its terms before reusing the data or the derived embeddings for commercial purposes.
+Code: MIT (add a `LICENSE` file to the repo). The RAVDESS dataset is licensed separately under CC BY-NC-SA 4.0, so check its terms before reusing the data or derived embeddings for commercial purposes.
